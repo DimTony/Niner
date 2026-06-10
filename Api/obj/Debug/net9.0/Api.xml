@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Api</name>
+    </assembly>
+    <members>
+        <member name="M:Api.Controllers.DlqController.GetDlq(System.Threading.CancellationToken)">
+            <summary>Lists all unresolved DLQ entries.</summary>
+        </member>
+        <member name="M:Api.Controllers.DlqController.RetryJob(System.Guid,System.Threading.CancellationToken)">
+            <summary>Manually retries a job from the DLQ.</summary>
+        </member>
+        <member name="M:Api.Controllers.EventsController.Stream(System.Threading.CancellationToken)">
+            <summary>
+            SSE stream — subscribe to receive real-time job status events.
+            Connect once; events arrive as server-sent events.
+            </summary>
+        </member>
+        <member name="M:Api.Controllers.JobsController.CreateJob(Api.DTOs.CreateJobRequest,System.Threading.CancellationToken)">
+            <summary>Creates a new job.</summary>
+        </member>
+        <member name="M:Api.Controllers.JobsController.GetJob(System.Guid,System.Threading.CancellationToken)">
+            <summary>Gets a job by ID.</summary>
+        </member>
+        <member name="M:Api.Controllers.JobsController.ListJobs(System.Nullable{Core.Enums.JobStatus},System.Int32,System.Int32,System.Threading.CancellationToken)">
+            <summary>Lists jobs with optional status filter and pagination.</summary>
+        </member>
+        <member name="M:Api.Controllers.JobsController.CancelJob(System.Guid,System.Threading.CancellationToken)">
+            <summary>Cancels a pending or processing job.</summary>
+        </member>
+        <member name="M:Api.Controllers.JobsController.GetJobLogs(System.Guid,System.Threading.CancellationToken)">
+            <summary>Gets structured logs for a job.</summary>
+        </member>
+        <member name="M:Api.Controllers.JobsController.GetDashboard(System.Threading.CancellationToken)">
+            <summary>Gets job status counts for the dashboard.</summary>
+        </member>
+    </members>
+</doc>

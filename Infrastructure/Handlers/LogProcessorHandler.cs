@@ -52,7 +52,7 @@ public class LogProcessorHandler : IJobHandler
             return new JobHandlerResult(false, $"Invalid log level: {level}");
 
         // Simulate processing time — parsing, enriching, routing
-        await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(50, 300)), ct);
+        await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(3000, 5000)), ct);
 
         // Simulate storage write failure
         if (_rng.NextDouble() < FailureRate)

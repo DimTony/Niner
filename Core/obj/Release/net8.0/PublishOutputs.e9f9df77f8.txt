@@ -1,3 +1,0 @@
-C:\Users\dimojiakuo\Desktop\projects\Dilamme\Core\bin\Release\net8.0\publish\Core.dll
-C:\Users\dimojiakuo\Desktop\projects\Dilamme\Core\bin\Release\net8.0\publish\Core.deps.json
-C:\Users\dimojiakuo\Desktop\projects\Dilamme\Core\bin\Release\net8.0\publish\Core.pdb

@@ -49,7 +49,7 @@ public class SendEmailHandler : IJobHandler
             return new JobHandlerResult(false, $"Invalid email address: {email.To}");
 
         // Simulate SMTP handshake delay
-        await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(200, 800)), ct);
+        await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(1000, 5000)), ct);
 
         // Simulate transient SMTP failure
         if (_rng.NextDouble() < FailureRate)

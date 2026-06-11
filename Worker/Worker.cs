@@ -376,7 +376,20 @@ public class WorkerService : BackgroundService
             job.ScheduledAt = retryAt;
 
             await jobRepo.Update(job, ct);
-            await _queue.EnqueueScheduled(job.Id, retryAt, ct);
+            try
+            {
+                await _queue.EnqueueScheduled(job.Id, retryAt, ct);
+            }
+            catch (Exception ex)
+            {
+                // Postgres is already updated — orphan recovery will rescue this job
+                // within 60 seconds. Log loudly so it is visible.
+                _logger.LogError(ex,
+                    "CRITICAL: Failed to enqueue retry in Redis. " +
+                    "Job is pending in Postgres and will be recovered by orphan recovery loop. " +
+                    "JobId={JobId} RetryAt={RetryAt}",
+                    job.Id, retryAt);
+            }
 
             await logRepo.Create(
                 job.Id, LogEvent.RetryAttempted,

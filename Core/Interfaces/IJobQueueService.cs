@@ -4,6 +4,7 @@ public interface IJobQueueService
 {
     // Ready queue (heap / sorted set)
     Task EnqueueReady(Guid jobId, double score, CancellationToken ct = default);
+    Task<bool> EnqueueReadyIfAbsent(Guid jobId, double score, CancellationToken ct = default);
     Task<Guid?> DequeueNext(CancellationToken ct = default);
     Task RemoveFromReady(Guid jobId, CancellationToken ct = default);
     Task UpdateScore(Guid jobId, double newScore, CancellationToken ct = default);

@@ -33,6 +33,19 @@ public class JobQueueService : IJobQueueService
         await _db.SortedSetAddAsync(ReadyQueue, jobId.ToString(), score);
     }
 
+    public async Task<bool> EnqueueReadyIfAbsent(
+        Guid jobId,
+        double score,
+        CancellationToken ct = default)
+    {
+        // NX = only add if member does not exist — idempotent
+        return await _db.SortedSetAddAsync(
+            ReadyQueue,
+            jobId.ToString(),
+            score,
+            SortedSetWhen.NotExists);
+    }
+
     public async Task<Guid?> DequeueNext(CancellationToken ct = default)
     {
         // ZPOPMIN is atomic — only one worker gets each job

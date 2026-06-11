@@ -44,6 +44,7 @@ public class SchedulerService : BackgroundService
             RunPromotionLoop(ct),
             RunWheelLoop(ct),
             RunAgingLoop(ct),
+            RunOrphanRecoveryLoop(ct),
             RunBenchmarkOnce(ct));
     }
 
@@ -318,5 +319,64 @@ public class SchedulerService : BackgroundService
         {
             _logger.LogError(ex, "Benchmark failed.");
         }
+    }
+
+    private async Task RunOrphanRecoveryLoop(CancellationToken ct)
+    {
+        // Wait on startup to let normal promotion run first
+        await Task.Delay(TimeSpan.FromSeconds(10), ct);
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await RecoverOrphanedJobsAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Orphan recovery error.");
+            }
+
+            // Run every 60 seconds — this is a safety net, not the primary path
+            await Task.Delay(TimeSpan.FromSeconds(60), ct);
+        }
+    }
+
+    private async Task RecoverOrphanedJobsAsync(CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var jobRepo = scope.ServiceProvider.GetRequiredService<IJobRepository>();
+
+        // Find all pending jobs whose scheduled_at has passed
+        // These should be in Redis but may not be
+        var due = await jobRepo.GetDueScheduledJobs(DateTimeOffset.UtcNow, ct);
+
+        if (due.Count == 0) return;
+
+        var recovered = 0;
+
+        foreach (var job in due)
+        {
+            // Check if it is already in the ready queue
+            // We do this by attempting ZADD NX — only adds if not present
+            var score = JobScoreCalculator.Calculate(
+                job.Priority, job.ScheduledAt, job.CreatedAt);
+
+            // NX flag: only add if member does not already exist
+            var added = await _queue.EnqueueReadyIfAbsent(job.Id, score, ct);
+
+            if (added)
+            {
+                recovered++;
+                _logger.LogWarning(
+                    "Orphaned job recovered and re-enqueued. " +
+                    "JobId={JobId} ScheduledAt={ScheduledAt} RetryCount={RetryCount}",
+                    job.Id, job.ScheduledAt, job.RetryCount);
+            }
+        }
+
+        if (recovered > 0)
+            _logger.LogInformation(
+                "Orphan recovery complete. Recovered={Count}", recovered);
     }
 }

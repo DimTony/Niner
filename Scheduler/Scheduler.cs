@@ -52,32 +52,42 @@ public class SchedulerService : BackgroundService
     // --------------------------------------------------
 
     private async Task RestoreStateAsync(CancellationToken ct)
+{
+    _logger.LogInformation("Restoring scheduler state from Redis.");
+
+    using var scope = _scopeFactory.CreateScope();
+    var jobRepo = scope.ServiceProvider.GetRequiredService<IJobRepository>();
+
+    var pointer = await _queue.GetWheelPointer(ct);
+    for (var i = 0; i < pointer; i++)
+        _wheel.Tick();
+
+    var now = DateTimeOffset.UtcNow;
+
+    var pending = await jobRepo.GetDueScheduledJobs(
+        now.AddHours(1), ct);
+
+    foreach (var job in pending)
     {
-        _logger.LogInformation("Restoring scheduler state from Redis.");
-
-        using var scope = _scopeFactory.CreateScope();
-        var jobRepo = scope.ServiceProvider.GetRequiredService<IJobRepository>();
-
-        // Sync wheel pointer from Redis
-        var pointer = await _queue.GetWheelPointer(ct);
-        for (var i = 0; i < pointer; i++)
-            _wheel.Tick(); // advance to stored position
-
-        // Reload pending jobs into heap
-        var pending = await jobRepo.GetDueScheduledJobs(
-            DateTimeOffset.UtcNow.AddHours(1), ct);
-
-        foreach (var job in pending)
+        if (job.ScheduledAt > now)
         {
-            var score = JobScoreCalculator.Calculate(
-                job.Priority, job.ScheduledAt, job.CreatedAt);
-            _heap.Push(new HeapEntry(job.Id, score));
+            // Future job — restore to scheduled set
+            await _queue.EnqueueScheduled(job.Id, job.ScheduledAt, ct);
             _wheel.AddJob(job.Id, job.ScheduledAt);
         }
-
-        _logger.LogInformation(
-            "State restored. HeapSize={HeapSize}", _heap.Count);
+        else
+        {
+            // Already due — go straight to ready queue
+            var score = JobScoreCalculator.Calculate(
+                job.Priority, job.ScheduledAt, job.CreatedAt);
+            await _queue.EnqueueReady(job.Id, score, ct);
+            _heap.Push(new HeapEntry(job.Id, score));
+        }
     }
+
+    _logger.LogInformation(
+        "State restored. HeapSize={HeapSize}", _heap.Count);
+}
 
     // --------------------------------------------------
     // Promotion loop — heap / sorted set

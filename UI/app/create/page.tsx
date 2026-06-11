@@ -98,15 +98,20 @@ export default function CreateJobPage() {
     setError("");
     if (!validatePayload(payload)) return;
 
+    // Convert local datetime-local value to UTC ISO string
+    const scheduledAtUtc = scheduledAt
+        ? new Date(scheduledAt).toISOString()
+        : undefined;
+
     create.mutate({
-      type,
-      payload,
-      priority,
-      scheduledAt: scheduledAt || undefined,
-      recurrence: recurrence || undefined,
-      dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
+        type,
+        payload,
+        priority,
+        scheduledAt: scheduledAtUtc,
+        recurrence: recurrence || undefined,
+        dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
     });
-  }
+}
 
   return (
     <main className="p-8 max-w-2xl mx-auto">

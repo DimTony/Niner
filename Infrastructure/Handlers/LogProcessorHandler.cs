@@ -3,6 +3,8 @@ using Core.Interfaces;
 using Core.DTOs;
 using Microsoft.Extensions.Logging;
 using System.Text;
+using Microsoft.Extensions.Options;
+using Core.Options;
 
 namespace Infrastructure.Handlers;
 
@@ -14,12 +16,14 @@ public class LogProcessorHandler : IJobHandler
     private static readonly HashSet<string> ValidLevels =
         ["DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
 
-    // Simulated failure rate — 15%
-    private const double FailureRate = 0.15;
+    private readonly double _failureRate;
 
-    public LogProcessorHandler(ILogger<LogProcessorHandler> logger)
+    public LogProcessorHandler(
+    ILogger<LogProcessorHandler> logger,
+    IOptions<HandlerOptions> options)
     {
         _logger = logger;
+        _failureRate = options.Value.LogProcessorFailureRate;
     }
 
     public async Task<JobHandlerResult> Execute(
@@ -55,7 +59,7 @@ public class LogProcessorHandler : IJobHandler
         await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(3000, 5000)), ct);
 
         // Simulate storage write failure
-        if (_rng.NextDouble() < FailureRate)
+        if (_rng.NextDouble() < _failureRate)
         {
             const string storageError = "Log storage write failed: buffer overflow";
 

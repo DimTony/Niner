@@ -2,7 +2,9 @@ using System.Text;
 using System.Text.Json;
 using Core.DTOs;
 using Core.Interfaces;
+using Core.Options;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Infrastructure.Handlers;
 
@@ -10,17 +12,18 @@ public class WebhookDeliveryHandler : IJobHandler
 {
     private readonly ILogger<WebhookDeliveryHandler> _logger;
     private static readonly Random _rng = new();
-
-    // Simulated failure rate — 25%
-    private const double FailureRate = 0.25;
+    private readonly double _failureRate;
 
     // Allowed methods
     private static readonly HashSet<string> ValidMethods =
         ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
-    public WebhookDeliveryHandler(ILogger<WebhookDeliveryHandler> logger)
+    public WebhookDeliveryHandler(
+    ILogger<WebhookDeliveryHandler> logger,
+    IOptions<HandlerOptions> options)
     {
         _logger = logger;
+        _failureRate = options.Value.WebhookDeliveryFailureRate;
     }
 
     public async Task<JobHandlerResult> Execute(
@@ -56,7 +59,7 @@ public class WebhookDeliveryHandler : IJobHandler
         await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(3000, 5000)), ct);
 
         // Simulate transient failures
-        if (_rng.NextDouble() < FailureRate)
+        if (_rng.NextDouble() < _failureRate)
         {
             var httpError = _rng.Next(4) switch
             {

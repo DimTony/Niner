@@ -2,20 +2,21 @@ using System.Text.Json;
 using Core.Interfaces;
 using Core.DTOs;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Core.Options;
 
 namespace Infrastructure.Handlers;
 
 public class SendEmailHandler : IJobHandler
 {
     private readonly ILogger<SendEmailHandler> _logger;
-
-    // Simulated transient failure rate — 30% of sends fail
     private static readonly Random _rng = new();
-    private const double FailureRate = 0.30;
+    private readonly double _failureRate;
 
-    public SendEmailHandler(ILogger<SendEmailHandler> logger)
+    public SendEmailHandler(ILogger<SendEmailHandler> logger, IOptions<HandlerOptions> options)
     {
         _logger = logger;
+         _failureRate = options.Value.SendEmailFailureRate;
     }
 
     public async Task<JobHandlerResult> Execute(
@@ -52,7 +53,7 @@ public class SendEmailHandler : IJobHandler
         await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(60000, 70000)), ct);
 
         // Simulate transient SMTP failure
-        if (_rng.NextDouble() < FailureRate)
+        if (_rng.NextDouble() < _failureRate)
         {
             var smtpError = _rng.Next(3) switch
             {

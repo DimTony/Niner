@@ -19,6 +19,8 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddInfrastructure(ctx.Configuration);
         services.Configure<WorkerOptions>(
             ctx.Configuration.GetSection(WorkerOptions.Section));
+        services.Configure<HandlerOptions>(
+            ctx.Configuration.GetSection(HandlerOptions.Section));
         services.AddHostedService<WorkerService>();
     })
     .Build();

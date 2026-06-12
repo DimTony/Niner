@@ -61,6 +61,7 @@ Responsible for:
 * Promoting scheduled jobs
 * Aging/starvation prevention
 * Timing wheel management
+* Recovery of orphaned scheduled jobs
 
 The scheduler never executes jobs.
 
@@ -72,8 +73,10 @@ Responsible for:
 * Executing handlers
 * Retry logic
 * DLQ routing
+* Recovery of stale locks from crashed workers
+* Scheduling recurring job instances
 
-Workers never schedule jobs.
+Workers never schedule the initial promotion of a job, but they do create and enqueue the next instance of a recurring job after completion.
 
 ---
 
@@ -107,6 +110,7 @@ Stores only:
 * Worker locks
 * Pub/Sub events
 * DLQ alert counters
+* Worker heartbeats
 
 Redis data is considered disposable.
 
@@ -123,24 +127,21 @@ Redis data is considered disposable.
                   │
                   ▼
              ┌──────────┐
-             │ Pending  │
-             └────┬─────┘
-                  │
-                  ▼
-             ┌──────────┐
-             │Processing│
-             └─┬──┬──┬──┘
-               │  │  │
-      Success  │  │  │ Failure
-               │  │  ▼
-               │  │ Failed
-               │  │
-               │  │ Retry
-               │  ▼
-               │ Pending
-               │
-               ▼
-          Completed
+        ┌───►│ Pending  │◄───┐
+        │    └────┬─────┘    │
+        │         │          │
+        │         ▼          │
+        │    ┌──────────┐    │
+        └────┤Processing├────┘
+   Re-blocked └─┬──┬──┬──┘  Retry / Stale-lock recovery
+   (deps not    │  │  │
+    yet done)   │  │  │ Failure
+       Success  │  │  ▼
+                │  │ Failed
+                │  │
+                │  ▼
+                ▼
+           Completed
 
 Cancellation:
 Pending -> Cancelled
@@ -155,8 +156,12 @@ Processing -> Cancelled (checkpoint-based)
 | Pending    | Eligible to run           |
 | Processing | Worker currently owns job |
 | Completed  | Finished successfully     |
-| Failed     | Exhausted retries         |
-| Cancelled  | Explicitly cancelled      |
+| Failed     | Exhausted retries          |
+| Cancelled  | Explicitly cancelled       |
+
+## Re-blocking on Dequeue
+
+When a worker dequeues a job, it re-checks the job's dependencies before claiming it. If any dependency is not yet `Completed` (a race between promotion and DAG resolution), the job transitions back from `Pending` to `Blocked` and is released without processing. It re-enters the ready queue automatically once `UnblockDependents` fires for the outstanding dependency.
 
 ---
 
@@ -197,7 +202,7 @@ Medium Priority:
 1,001,734,000,000
 ```
 
-The priority component dominates all timestamps.
+The priority component dominates all timestamps. The `created_at_ms / 1_000_000` term acts as a tiebreaker between jobs with identical priority and `scheduled_at`, favoring earlier-created jobs.
 
 ## Heap Operations
 
@@ -337,32 +342,35 @@ High-priority jobs can indefinitely delay low-priority jobs.
 
 ## Aging Policy
 
-Waiting time boosts effective priority.
+Waiting time boosts effective priority. Wait time is measured from `created_at`.
 
-| Wait Time | Effective Priority |
-| --------- | ------------------ |
-| < 2 hours | Original           |
-| ≥ 2 hours | Medium             |
-| ≥ 4 hours | High               |
+| Wait Time   | Effective Priority                          |
+| ----------- | -------------------------------------------- |
+| < 5 minutes | Original                                      |
+| ≥ 5 minutes | Medium (only if original priority is Low)    |
+| ≥ 10 minutes| High                                          |
 
 Actual priority stored in PostgreSQL never changes.
 
-Only queue position changes.
+Only queue position (score) changes.
 
 ## Effective Priority Function
 
 ```text
-if wait >= 4h:
+if wait >= 10 minutes:
     High
 
-else if wait >= 2h:
-    Medium
+else if wait >= 5 minutes:
+    if actual == Low:
+        Medium
+    else:
+        actual
 
 else:
-    ActualPriority
+    actual
 ```
 
-Scheduler periodically recalculates scores and updates Redis.
+Scheduler periodically recalculates scores and updates Redis (and the in-memory heap mirror) on a fixed interval (`AgingIntervalSeconds`).
 
 ---
 
@@ -392,36 +400,19 @@ C -> B
 
 A job becomes runnable only when every dependency is completed.
 
-## Unblocking Query
+## Unblocking on Completion
 
-When a job completes:
+When a job completes, the worker looks up all jobs that depend on it, then for each candidate checks whether it still has any incomplete dependency:
 
-```sql
-SELECT j.id
-FROM jobs j
-JOIN job_dependencies d
-    ON d.job_id = j.id
-WHERE d.depends_on_id = :completed_job
-AND j.status = 'blocked'
-AND NOT EXISTS (
-    SELECT 1
-    FROM job_dependencies d2
-    JOIN jobs j2
-        ON j2.id = d2.depends_on_id
-    WHERE d2.job_id = j.id
-      AND j2.status != 'completed'
-);
-```
-
-Returned jobs transition:
+1. Find all `job_dependencies` rows where `depends_on_id` equals the completed job's ID — these are the candidate dependent jobs.
+2. For each candidate, check whether any of its dependencies are not yet `Completed`.
+3. If none are outstanding and the candidate's status is `Blocked`, transition it to `Pending` and push it onto the ready queue.
 
 ```text
 Blocked -> Pending
 ```
 
-and enter the ready queue.
-
-No polling required.
+This is event-driven (triggered by job completion) rather than polled, though it is implemented as one query per candidate dependent rather than a single set-based SQL statement.
 
 ---
 
@@ -463,13 +454,15 @@ Another worker owns job
 
 ## Heartbeat
 
-Every 10 seconds:
+While a job is in `Processing`, the owning worker renews its lock on an interval (`HeartbeatIntervalSeconds`):
 
 ```redis
 PEXPIRE lock:job:{job_id} 30000
 ```
 
-Lock remains alive while processing.
+The renewal is performed via a Lua script that checks the lock value matches the renewing worker's ID before extending the TTL, so a worker can never renew a lock it no longer owns.
+
+The heartbeat task is started after a job is claimed and is cancelled at each cancellation checkpoint (before handler execution, and after the handler completes).
 
 ## Atomic Release
 
@@ -488,13 +481,7 @@ Prevents accidental deletion of another worker's lock.
 
 ## Worker Crash
 
-If worker dies:
-
-1. Heartbeat stops
-2. Lock expires
-3. Job becomes reclaimable
-
-No manual recovery required.
+If a worker dies mid-processing, its lock heartbeat stops and the Redis lock eventually expires. Independently, the job row in PostgreSQL still shows `Processing` with a stale `LockedAt` timestamp — see Recovery & Self-Healing below for how this is reclaimed.
 
 ---
 
@@ -525,13 +512,13 @@ Attempt 3 -> 25 seconds
 Jitter:
 
 ```text
-0% to 20% of base delay
+±20% of base delay
 ```
 
 Example:
 
 ```text
-5s + random(0s..1s)
+5s ± up to 1s
 ```
 
 ## Rationale
@@ -549,7 +536,7 @@ Immediately cancelled.
 Actions:
 
 1. Update PostgreSQL
-2. Remove from Redis queue
+2. Remove from Redis queue (both ready and scheduled sets)
 
 State transition:
 
@@ -567,13 +554,20 @@ API sets:
 cancellation_requested = true
 ```
 
-Worker checks cancellation after each logical checkpoint.
+(represented by the job's `Status` field being set to `Cancelled` directly)
+
+The worker checks for cancellation at logical checkpoints:
+
+1. Immediately after claiming the job and before invoking the handler
+2. Immediately after the handler completes, before recording success or failure
 
 When detected:
 
-1. Cleanup
-2. Release resources
-3. Mark cancelled
+1. Cancel the lock heartbeat
+2. Log the cancellation
+3. Publish a `cancelled` event
+4. Release the Redis lock
+5. Discard the handler's result
 
 State transition:
 
@@ -592,7 +586,7 @@ This prevents partial writes and data corruption.
 Job enters DLQ when:
 
 ```text
-retry_count >= max_retries
+retry_count > max_retries
 ```
 
 ## Storage
@@ -625,7 +619,7 @@ Workflow:
 ```text
 INCR dlq:count
 
-if count >= 10:
+if count >= threshold:
     send alert
     reset counter
 ```
@@ -636,6 +630,85 @@ Current implementation:
 
 * Structured warning log
 * Mock email notification
+
+## Manual Retry
+
+A DLQ entry can be manually retried via the API. This resets the job's retry count, status, lock fields, and error to a clean `Pending` state, marks the DLQ entry resolved, decrements the DLQ counter, and re-enqueues the job into the ready queue with a freshly computed score.
+
+---
+
+# Recurring Jobs
+
+## Purpose
+
+Some job types need to run on a fixed schedule indefinitely (e.g. periodic health checks, polling jobs).
+
+## Supported Intervals
+
+```text
+Every1Minute
+Every5Minutes
+Every1Hour
+```
+
+## Flow
+
+Recurrence is driven entirely by the worker, on successful completion of a job that has a `Recurrence` value set:
+
+1. The current job completes normally and is marked `Completed`.
+2. The worker computes the next run time as `now + interval`.
+3. A brand new job row is created with:
+   - A new `Id`
+   - The same `Type`, `Payload`, `Priority`, `MaxRetries`, and `Recurrence` as the completed job
+   - `Status = Pending`, `RetryCount = 0`
+   - `ScheduledAt` set to the computed next run time
+4. The new job is inserted into PostgreSQL and added to the Redis scheduled set (`scheduler:scheduled_jobs`) keyed by its `ScheduledAt`.
+5. A `Created` log entry is written against the new job, recording the parent job's ID and the computed interval in its metadata.
+
+## Notes
+
+* There is no foreign key or persistent parent/child relationship between recurring job instances — the link exists only in the new job's log metadata.
+* If the parent job is cancelled or fails permanently (moves to DLQ), no further instances are scheduled, since recurrence only fires on the success path.
+* Each instance goes through the full normal lifecycle (timing wheel placement, promotion, aging, DAG checks if dependencies are ever added, etc.) independently.
+
+---
+
+# Recovery & Self-Healing
+
+The system has two independent, time-based recovery mechanisms that act as safety nets on top of the primary event-driven flows. Both are designed so that PostgreSQL remains the authority and Redis state can always be reconstructed or reconciled from it.
+
+## Stale Lock Recovery (Worker)
+
+Runs on each worker on a fixed interval (every 30 seconds).
+
+1. Query PostgreSQL for jobs in `Processing` status whose `LockedAt` is older than `StaleLockThresholdMinutes`.
+2. For each such job:
+   - Reset `Status` to `Pending`, clear `LockedBy` and `LockedAt`.
+   - Recompute its score and push it back onto the Redis ready queue.
+   - Write a `RetryAttempted` log entry noting the recovery.
+
+This handles the case where a worker crashes or is killed while holding a job, leaving the Redis lock to expire naturally while the PostgreSQL row is left stuck in `Processing`.
+
+## Orphan Scheduled-Job Recovery (Scheduler)
+
+Runs on the scheduler on a fixed interval (every 60 seconds), starting 10 seconds after scheduler startup to let normal promotion run first.
+
+1. Query PostgreSQL for all jobs that are `Pending` and whose `ScheduledAt` has already passed.
+2. For each such job, attempt `EnqueueReadyIfAbsent` — a conditional (`NX`-style) add to the Redis ready queue that only succeeds if the job is not already present.
+3. If the add succeeds (the job was missing from Redis), log a warning noting the recovery.
+
+This handles cases where a job's promotion from the scheduled set to the ready queue failed or was lost (e.g. a transient Redis enqueue failure during retry scheduling), without double-enqueuing jobs that are already correctly queued.
+
+## Startup State Restoration (Scheduler)
+
+On startup, the scheduler:
+
+1. Reads the persisted timing wheel pointer from Redis and advances its in-memory wheel to match.
+2. Queries PostgreSQL for jobs due within the next hour.
+3. For jobs whose `ScheduledAt` is still in the future, re-adds them to the Redis scheduled set and the in-memory timing wheel.
+4. For jobs already due, computes their score, pushes them onto the Redis ready queue, and pushes them onto the in-memory heap.
+
+This ensures the scheduler's in-memory heap and timing wheel are rebuilt consistently after a restart.
 
 ---
 
@@ -659,7 +732,14 @@ Browser EventSource
 
 ## Event Flow
 
-Worker publishes:
+On connection, the API immediately sends a `connected` event so the browser knows the stream is live:
+
+```text
+event: connected
+data: {"message":"SSE stream connected"}
+```
+
+Worker publishes job status changes:
 
 ```json
 {
@@ -674,15 +754,11 @@ Redis channel:
 job:events
 ```
 
-API-hosted subscriber receives event.
+API-hosted subscriber receives event and forwards it as a `job_update` SSE event.
 
-Subscriber broadcasts via SSE.
+Browser updates only affected rows (job detail, jobs list, dashboard counts, and DLQ list when the status is `failed`).
 
-Browser updates only affected row.
-
-No polling.
-
-No page refresh.
+No polling required for updates, though the dashboard also performs a periodic fallback refetch.
 
 ---
 
@@ -691,7 +767,7 @@ No page refresh.
 ## Server Layout
 
 ```text
-VPS
+AWS EC2 instance
 ├── Nginx
 ├── .NET API
 ├── .NET Scheduler
@@ -719,7 +795,7 @@ Postgres    :5432
 Redis       :6379
 ```
 
-PostgreSQL and Redis are bound to localhost only.
+PostgreSQL and Redis are bound to localhost only. EC2 security group restricts inbound traffic to 80/443 (and SSH for administration).
 
 ## Reverse Proxy
 
@@ -728,7 +804,7 @@ Nginx handles:
 * SSL termination
 * Reverse proxy
 * Compression
-* SSE forwarding
+* SSE forwarding (buffering disabled for the events stream)
 
 ## DNS
 
@@ -737,6 +813,8 @@ DuckDNS:
 ```text
 scheduler.duckdns.org
 ```
+
+Pointed at the EC2 instance's public IP.
 
 ## TLS
 
@@ -756,9 +834,7 @@ jobscheduler-worker.service
 jobscheduler-scheduler.service
 ```
 
-Managed by systemd.
-
-Automatic restart on failure.
+Managed by systemd on the EC2 instance. Automatic restart on failure.
 
 ---
 
@@ -768,9 +844,10 @@ Automatic restart on failure.
 2. Redis is disposable operational state.
 3. API never executes jobs.
 4. Scheduler never executes jobs.
-5. Workers never schedule jobs.
+5. Workers claim and execute jobs, and schedule the next instance of recurring jobs on success.
 6. Locks prevent duplicate execution.
-7. DAG resolution is event-driven.
-8. Starvation is prevented through aging.
+7. DAG resolution is event-driven, triggered on job completion.
+8. Starvation is prevented through aging based on wait time since creation.
 9. Failed jobs are recoverable through DLQ workflows.
-10. Real-time visibility is provided through SSE.
+10. Stale locks and orphaned scheduled jobs are reconciled automatically via time-based recovery loops.
+11. Real-time visibility is provided through SSE.

@@ -253,6 +253,8 @@ public class WorkerService : BackgroundService
             var current = await jobRepo.GetById(job.Id, ct);
             if (current is { Status: JobStatus.Cancelled })
             {
+                heartbeatCts.Cancel();
+                 
                 await logRepo.Create(
                     job.Id, LogEvent.Cancelled,
                     "Job cancelled before execution started.",

@@ -249,12 +249,41 @@ public class WorkerService : BackgroundService
                 () => RunLockHeartbeat(jobId, heartbeatCts.Token),
                 heartbeatCts.Token);
 
+            // Re-check for race: cancel request arrived between dequeue and claim
+            var current = await jobRepo.GetById(job.Id, ct);
+            if (current is { Status: JobStatus.Cancelled })
+            {
+                await logRepo.Create(
+                    job.Id, LogEvent.Cancelled,
+                    "Job cancelled before execution started.",
+                    null, ct);
+                await _events.PublishJobEvent(job.Id, "cancelled", ct);
+                await _queue.ReleaseLock(job.Id, _options.WorkerId, ct);
+                return;
+            }
+
             // Execute handler
+            // TODO: Implement mid-execution cancellation (stopping the Task.Delay or SMTP call partway through), may require threading a per-job CancellationToken into IJobHandler.Execute, sourced from polling the DB or a Redis pub/sub channel during execution
             var handler = _handlerFactory.Resolve(job.Type);
             var result  = await handler.Execute(job.Payload, ct);
 
             // Stop heartbeat
             await heartbeatCts.CancelAsync();
+
+            // Checkpoint — re-check if cancellation was requested while handler ran
+            var freshJob = await jobRepo.GetById(job.Id, ct);
+            if (freshJob is { Status: JobStatus.Cancelled })
+            {
+                await logRepo.Create(
+                    job.Id, LogEvent.Cancelled,
+                    "Job cancellation honored after handler completed; result discarded.",
+                    new { discardedSuccess = result.Success },
+                    ct);
+            
+                await _events.PublishJobEvent(job.Id, "cancelled", ct);
+                await _queue.ReleaseLock(job.Id, _options.WorkerId, ct);
+                return;
+            }
 
             if (result.Success)
                 await HandleSuccess(job, result, jobRepo, logRepo, dlqRepo, ct);

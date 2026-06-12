@@ -23,6 +23,42 @@ public class DeadLetterRepository : IDeadLetterRepository
         return entry;
     }
 
+    public async Task<DeadLetterEntry> Upsert(
+        Guid jobId,
+        string errorDetails,
+        int failureCount,
+        CancellationToken ct = default)
+    {
+        var existing = await _db.DeadLetterEntries
+            .FirstOrDefaultAsync(d => d.JobId == jobId, ct);
+
+        if (existing is not null)
+        {
+            existing.ErrorDetails = errorDetails;
+            existing.FailureCount = failureCount;
+            existing.Resolved     = false;
+            existing.ResolvedAt   = null;
+            existing.CreatedAt    = DateTimeOffset.UtcNow;
+            await _db.SaveChangesAsync(ct);
+            return existing;
+        }
+
+        var entry = new DeadLetterEntry
+        {
+            Id           = Guid.NewGuid(),
+            JobId        = jobId,
+            ErrorDetails = errorDetails,
+            FailureCount = failureCount,
+            CreatedAt    = DateTimeOffset.UtcNow,
+            Resolved     = false
+        };
+
+        _db.DeadLetterEntries.Add(entry);
+        await _db.SaveChangesAsync(ct);
+        return entry;
+    }
+
+
     public async Task<IReadOnlyList<DeadLetterEntry>> GetUnresolved(
         CancellationToken ct = default)
     {

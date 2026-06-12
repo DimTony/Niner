@@ -21,9 +21,15 @@ public static class DependencyInjection
             options.UseNpgsql(
                 configuration.GetConnectionString("Postgres")));
 
+
         var redisConn = configuration.GetConnectionString("Redis")!;
-        services.AddSingleton<IConnectionMultiplexer>(
-            ConnectionMultiplexer.Connect(redisConn));
+
+        services.AddSingleton<IConnectionMultiplexer>(_ =>
+        {
+            var options = ConfigurationOptions.Parse(redisConn);
+            options.AbortOnConnectFail = false;
+            return ConnectionMultiplexer.Connect(options);
+        });
 
         services.AddScoped<IJobRepository, JobRepository>();
         services.AddScoped<IDeadLetterRepository, DeadLetterRepository>();

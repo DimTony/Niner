@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 
 namespace Worker;
 
@@ -357,7 +358,8 @@ public class WorkerService : BackgroundService
         job.Status   = JobStatus.Completed;
         job.LockedBy = null;
         job.LockedAt = null;
-        await jobRepo.Update(job, ct);
+        // await jobRepo.Update(job, ct);
+        await SafeUpdate(job, jobRepo, ct);
 
         await logRepo.Create(
             job.Id, LogEvent.Completed,
@@ -406,7 +408,9 @@ public class WorkerService : BackgroundService
             job.LockedAt = null;
             job.ScheduledAt = retryAt;
 
-            await jobRepo.Update(job, ct);
+            // await jobRepo.Update(job, ct);
+            await SafeUpdate(job, jobRepo, ct);
+
             try
             {
                 await _queue.EnqueueScheduled(job.Id, retryAt, ct);
@@ -442,16 +446,17 @@ public class WorkerService : BackgroundService
             job.LockedAt = null;
             await jobRepo.Update(job, ct);
 
-            var dlqEntry = new Core.Entities.DeadLetterEntry
-            {
-                Id           = Guid.NewGuid(),
-                JobId        = job.Id,
-                ErrorDetails = error,
-                FailureCount = job.RetryCount,
-                Resolved     = false
-            };
+            // var dlqEntry = new Core.Entities.DeadLetterEntry
+            // {
+            //     Id           = Guid.NewGuid(),
+            //     JobId        = job.Id,
+            //     ErrorDetails = error,
+            //     FailureCount = job.RetryCount,
+            //     Resolved     = false
+            // };
 
-            await dlqRepo.Create(dlqEntry, ct);
+            // await dlqRepo.Create(dlqEntry, ct);
+            await dlqRepo.Upsert(job.Id, error, job.RetryCount, ct);
 
             // Increment DLQ counter and check alert threshold
             var dlqCount = await _queue.IncrementDlqCount(ct);
@@ -559,5 +564,31 @@ public class WorkerService : BackgroundService
         _logger.LogInformation(
             "Next recurrence scheduled. NewJobId={NewJobId} NextRun={NextRun} Interval={Interval}",
             nextJob.Id, nextRun, interval);
+    }
+
+    private async Task SafeUpdate(Core.Entities.Job job, IJobRepository jobRepo, CancellationToken ct)
+    {
+        try
+        {
+            await jobRepo.Update(job, ct);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            _logger.LogWarning("Concurrency conflict updating job {JobId}; reloading and re-applying.", job.Id);
+
+            var fresh = await jobRepo.GetById(job.Id, ct)
+                ?? throw new InvalidOperationException($"Job {job.Id} disappeared during concurrency retry.");
+
+            // Re-apply this call's intended changes onto the fresh row
+            fresh.Status      = job.Status;
+            fresh.RetryCount  = job.RetryCount;
+            fresh.MaxRetries  = job.MaxRetries;
+            fresh.LastError   = job.LastError;
+            fresh.LockedBy    = job.LockedBy;
+            fresh.LockedAt    = job.LockedAt;
+            fresh.ScheduledAt = job.ScheduledAt;
+
+            await jobRepo.Update(fresh, ct);
+        }
     }
 }

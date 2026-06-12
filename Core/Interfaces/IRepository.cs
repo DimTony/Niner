@@ -30,6 +30,7 @@ public interface IJobRepository
 public interface IDeadLetterRepository
 {
     Task<DeadLetterEntry> Create(DeadLetterEntry entry, CancellationToken ct = default);
+    Task<DeadLetterEntry> Upsert(Guid jobId, string errorDetails, int failureCount, CancellationToken ct = default);
     Task<IReadOnlyList<DeadLetterEntry>> GetUnresolved(CancellationToken ct = default);
     Task<DeadLetterEntry?> GetByJobId(Guid jobId, CancellationToken ct = default);
     Task MarkResolved(Guid id, CancellationToken ct = default);

@@ -74,6 +74,11 @@ public class JobConfiguration : IEntityTypeConfiguration<Job>
             .HasColumnName("last_error")
             .IsRequired(false);
 
+        builder.Property<uint>("xmin")
+            .HasColumnType("xid")
+            .ValueGeneratedOnAddOrUpdate()
+            .IsConcurrencyToken();
+
         // Relationships
         builder.HasMany(j => j.Dependencies)
             .WithOne(d => d.Job)

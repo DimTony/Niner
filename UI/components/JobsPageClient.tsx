@@ -127,8 +127,8 @@ export default function JobsPageClient() {
                       >
                         View
                       </Link>
-                      {(job.status === "pending" ||
-                        job.status === "processing") && (
+                      {(job.status.toLowerCase() === "pending" ||
+                        job.status.toLowerCase() === "processing") && (
                         <button
                           onClick={() => cancel.mutate(job.id)}
                           className="text-red-500 hover:underline text-xs"

@@ -56,7 +56,7 @@ public class WebhookDeliveryHandler : IJobHandler
             return new JobHandlerResult(false, $"Unsupported HTTP method: {method}");
 
         // Simulate network latency
-        await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(3000, 5000)), ct);
+        await Task.Delay(TimeSpan.FromMilliseconds(_rng.Next(60000, 70000)), ct);
 
         // Simulate transient failures
         if (_rng.NextDouble() < _failureRate)

@@ -397,7 +397,7 @@ public class WorkerService : BackgroundService
         job.RetryCount++;
         job.LastError = error;
 
-        if (job.RetryCount <= job.MaxRetries)
+        if (job.RetryCount < job.MaxRetries)
         {
             // Schedule retry with backoff + jitter
             var delay       = RetryCalculator.GetDelay(job.RetryCount);
